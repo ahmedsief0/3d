@@ -2,52 +2,56 @@ from flask import Flask, request, jsonify
 import trimesh
 import os
 import tempfile
+import requests
 
-app = Flask(__name__)
+app = Flask(_name_)
 
 @app.route("/")
 def home():
-    return "Trimesh Area Calculator API is running!"
+    return jsonify({"message": "Trimesh JSON API is running!"})
 
-@app.route('/calculate-area', methods=['POST'])
+@app.route("/calculate-area", methods=["POST"])
 def calculate_area():
-    # 1. اتأكد إن فيه ملف اترفع
-    if 'file' not in request.files:
-        return jsonify({"error": "No file part"}), 400
-    
-    file = request.files['file']
-    
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
+    try:
+        data = request.get_json()
 
-    if file:
-        # 2. احفظ الملف بشكل مؤقت
-        # بنستخدم tempfile عشان الأمان وإنه يتمسح لوحده
+        # ✅ اتأكد إن JSON وصل
+        if not data:
+            return jsonify({"error": "No JSON body found"}), 400
+
+        # ✅ استخرج اللينك من JSON
+        model_url = data.get("result", {}).get("pbr_model", {}).get("url")
+        if not model_url:
+            return jsonify({"error": "Model URL not found in JSON"}), 400
+
+        # ✅ نزّل الملف مؤقتاً
+        response = requests.get(model_url)
+        if response.status_code != 200:
+            return jsonify({"error": f"Failed to download model: {response.status_code}"}), 400
+
         temp_dir = tempfile.gettempdir()
-        filepath = os.path.join(temp_dir, file.filename)
-        file.save(filepath)
-        
-        try:
-            # 3. حمّل الموديل بـ trimesh
-            mesh = trimesh.load_mesh(filepath)
-            
-            # 4. احسب المساحة (السطر السحري)
-            surface_area = mesh.area
-            
-            # 5. امسح الملف المؤقت
-            os.remove(filepath)
-            
-            # 6. ارجع النتيجة كـ JSON
-            return jsonify({
-                "status": "success",
-                "filename": file.filename,
-                "surface_area": surface_area
-            })
-        except Exception as e:
-            # لو حصل إيرور (مثلاً الملف بايظ)
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            return jsonify({"error": f"Could not process file: {str(e)}"}), 500
+        filepath = os.path.join(temp_dir, "model.glb")
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+        with open(filepath, "wb") as f:
+            f.write(response.content)
+
+        # ✅ حمّل الموديل واحسب المساحة
+        mesh = trimesh.load_mesh(filepath)
+        surface_area = mesh.area
+
+        # ✅ امسح الملف
+        os.remove(filepath)
+
+        return jsonify({
+            "status": "success",
+            "model_url": model_url,
+            "surface_area": surface_area
+        })
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+if _name_ == "_main_":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
