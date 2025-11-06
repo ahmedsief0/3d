@@ -3,75 +3,108 @@ import trimesh
 import os
 import tempfile
 import requests
+import numpy # Trimesh يستخدمها
 
-# 
-# 1️⃣ FIX-1: لازم 2 underscores هنا
-# 
 app = Flask(__name__)
 
 @app.route("/")
 def home():
-    return jsonify({"message": "Trimesh JSON API is running!"})
+    return jsonify({"message": "Trimesh API (with Scaling) is running!"})
 
 @app.route("/calculate-area", methods=["POST"])
 def calculate_area():
     try:
         data = request.get_json()
-
-        # اتأكد إن JSON وصل
         if not data:
             return jsonify({"error": "No JSON body found"}), 400
 
-        #
-        # 2️⃣ FIX-2: ده السطر الصح عشان توصل للينك جوه الـ JSON
-        #
+        # --- 1. استخراج رابط الموديل (زي ما هو) ---
         model_url = data.get("result", {}).get("pbr_model", {}).get("url")
-        
-        if not model_url:
-            return jsonify({"error": "Model URL not found in JSON path: result.pbr_model.url"}), 400
-        
-        # اتأكد إن اللينك ده string مش dictionary
-        if not isinstance(model_url, str):
-             return jsonify({"error": f"Expected URL to be a string, but got {type(model_url)}"}), 400
+        if not model_url or not isinstance(model_url, str):
+            return jsonify({"error": "Model URL (result.pbr_model.url) must be a string"}), 400
 
-        # نزّل الملف مؤقتاً
+        # --- 2. استخراج معلومات التحجيم (الجزء الجديد) ---
+        scale_info = data.get("scale_info")
+        target_dimension = None
+        target_value = None
+
+        if scale_info and isinstance(scale_info, dict):
+            target_dimension = scale_info.get("dimension") # "height", "width", "depth"
+            target_value = scale_info.get("value")       # e.g., 20.0 (المقاس بالسنتيمتر مثلاً)
+
+            # نتأكد إن البيانات سليمة
+            if not (target_dimension in ["height", "width", "depth"] and 
+                    isinstance(target_value, (int, float)) and 
+                    target_value > 0):
+                return jsonify({"error": "Invalid scale_info. Use {'dimension': 'height'/'width'/'depth', 'value': > 0}"}), 400
+
+        # --- 3. تحميل الموديل (زي ما هو) ---
         response = requests.get(model_url)
-        response.raise_for_status() # هيعمل ايرور لو اللينك مش شغال
+        response.raise_for_status()
 
         temp_dir = tempfile.gettempdir()
-        # هنحفظه بنفس الامتداد بتاعه (e.g., .glb)
         file_ext = os.path.splitext(model_url.split('?')[0])[-1]
         filepath = os.path.join(temp_dir, f"temp_model{file_ext}")
-
         with open(filepath, "wb") as f:
             f.write(response.content)
 
-        # حمّل الموديل واحسب المساحة
+        # --- 4. تحميل الموديل بـ Trimesh (زي ما هو) ---
         mesh = trimesh.load_mesh(filepath)
+        
+        # حفظ الأبعاد الأصلية للمقارنة
+        original_extents = mesh.extents.copy() # [width, depth, height]
+
+        # --- 5. تطبيق التحجيم (المنطق الجديد) ---
+        scale_factor = 1.0
+        if target_dimension:
+            # .extents بتجيب المقاسات [العرض X, العمق Y, الارتفاع Z]
+            current_extents = mesh.extents
+            
+            if target_dimension == "width":    # X-axis
+                current_dim = current_extents[0]
+            elif target_dimension == "depth":  # Y-axis
+                current_dim = current_extents[1]
+            elif target_dimension == "height": # Z-axis
+                current_dim = current_extents[2]
+            
+            if current_dim == 0:
+                return jsonify({"error": "Cannot scale model with zero dimension"}), 400
+            
+            # حساب معامل التكبير/التصغير
+            scale_factor = target_value / current_dim
+            
+            # تطبيق التحجيم على كل المحاور (عشان نحافظ على النسبة والتناسب)
+            mesh.apply_scale(scale_factor)
+        
+        # الأبعاد الجديدة بعد التحجيم
+        scaled_extents = mesh.extents.copy()
+
+        # --- 6. حساب المساحة (للموديل المُعدل) ---
         surface_area = mesh.area
 
-        # امسح الملف
+        # --- 7. مسح الملف المؤقت (زي ما هو) ---
         os.remove(filepath)
 
+        # --- 8. إرجاع النتيجة الكاملة ---
         return jsonify({
             "status": "success",
             "model_url": model_url,
-            "surface_area": surface_area
+            "scaling": {
+                "applied": bool(target_dimension),
+                "target_dimension": target_dimension,
+                "target_value": target_value,
+                "scale_factor_applied": scale_factor
+            },
+            "original_dimensions_W_D_H": original_extents.tolist(),
+            "scaled_dimensions_W_D_H": scaled_extents.tolist(),
+            "surface_area_of_scaled_model": surface_area
         })
 
-    except requests.exceptions.RequestException as e:
-        # لو فشل في تحميل اللينك
-        return jsonify({"error": f"Failed to download model: {str(e)}"}), 500
     except Exception as e:
-        # لو فشل في أي حاجة تانية (زي trimesh)
         if 'filepath' in locals() and os.path.exists(filepath):
-            os.remove(filepath) # امسح الملف المؤقت لو حصل ايرور
+            os.remove(filepath)
         return jsonify({"error": f"An internal error occurred: {str(e)}"}), 500
 
-
-#
-# 3️⃣ FIX-3: لازم 2 underscores هنا برضو
-#
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
